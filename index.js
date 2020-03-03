@@ -4,9 +4,8 @@ const { google } = require('googleapis');
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const TOKEN_PATH = 'token.json';
-var AUTHURL = 'holi'
-
-const util = require('util')
+const CREDENTIALS_PATH = 'credentials.json';
+var AUTHURL = null;
 
 var express = require('express');
 var app = express();
@@ -14,13 +13,22 @@ var app = express();
 app.set('view engine', 'pug');
 app.use(express.static(__dirname + '/webform'));
 
-const auth = util.promisify(authorize)
+var bodyParser = require('body-parser')
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({
+  extended: true
+}));
+
+app.use(express.json());
+app.use(express.urlencoded({
+	extended: true
+}));
 
 //-------------------------------------------------------------
 
 app.get('/', function (req, res) {
-	// Check if TOKEN already exists
-	fs.readFile('credentials.json', (err) => {
+	console.log('Ingreso')
+	fs.readFile(CREDENTIALS_PATH, (err) => {
 		if (err) {
 			res.redirect('noCredentialsError');
 		}
@@ -31,7 +39,6 @@ app.get('/', function (req, res) {
 				}
 				else {
 					res.redirect('predictSheet');
-					loadToken(token);
 				}
 			});
 		}
@@ -39,28 +46,47 @@ app.get('/', function (req, res) {
 });
 
 app.get('/authorization', function (req, res) {
-	res.render('authorization');
-	getAuthorizationUrl();
+	loadToken().then(() => {
+		console.log('Autorización Ok');
+		res.render('authorizationOk');
+	}).catch(function (err) {
+		console.log('Autorización');
+		res.render('authorization');
+		getAuthorizationUrl();
+	});
 });
 
 app.post('/authorize', function (req, res) {
-	//console.log(req.body.code)
-	res.render('error')
+	console.log('Autorizando...')
+	getNewToken(req.body.code).then((flag) => {
+		res.render('authorizationOk')
+	}).catch(function (err) {
+		console.log('errorrrrrrrrrrrrrrrrr');
+	});
 });
 
 app.get('/getCode', function (req, res) {
+	console.log('Obteniendo código...')
 	res.redirect(AUTHURL);
 });
 
 app.get('/predictSheet', function (req, res) {
-	res.render('predictSheet');
+	loadToken().then(() => {
+		console.log('Predecir')
+		res.render('predictSheet')
+	}).catch( function (err) {
+		console.log('errorrrrrrrr');
+		res.redirect('/');
+	});
 });
 
 app.get('/noCredentialsError', function (req, res) {
+	console.log('Sin credenciales')
 	res.render('noCredentialsError');
 });
 
 app.get('*', function (req, res) {
+	console.log('Error')
 	res.render('error');
 });
 
@@ -69,15 +95,6 @@ app.get('*', function (req, res) {
 const server = app.listen(3000, function () {
 	console.log(`Express running → PORT ${server.address().port}`)
 });
-
-function init() {
-	console.log('wiwiw');
-	fs.readFile('credentials.json', (err, content) => {
-		if (err) return console.log('Error al cargar credenciales:', err);
-
-		authorize(JSON.parse(content))
-	});
-}
 
 function enableAPI(credentials) {
 	const { client_id } = credentials.installed;
@@ -94,50 +111,6 @@ function enableAPI(credentials) {
 	});
 }
 
-function authorize(credentials, callback) {
-	const { client_secret, client_id, redirect_uris } = credentials.installed;
-	const oAuth2Client = new google.auth.OAuth2(
-		client_id, client_secret, redirect_uris[0]);
-
-	// Check if we have previously stored a token.
-	fs.readFile(TOKEN_PATH, (err, token) => {
-		if (err) return getNewToken(oAuth2Client, callback);
-		oAuth2Client.setCredentials(JSON.parse(token));
-		callback(oAuth2Client);
-	});
-}
-
-function getNewToken(oAuth2Client, callback) {
-	console.log('new token');
-
-	const authUrl = oAuth2Client.generateAuthUrl({
-		access_type: 'offline',
-		scope: SCOPES,
-	});
-	//console.log('Authorize this app by visiting this url:', authUrl);
-
-	return askCode(oAuth2Client, authUrl, callback);
-}
-
-function askCode(oAuth2Client, authUrl, callback) {
-	//console.log(authUrl)
-	//return setToken(oAuth2Client, code, callback)
-
-}
-
-function setToken(oAuth2Client, code, callback) {
-	console.log('Código recibido')
-	oAuth2Client.getToken(code, (err, token) => {
-		if (err) return console.error('Error al intentar adquirir token de acceso', err);
-		oAuth2Client.setCredentials(token);
-		// Store the token to disk for later program executions
-		fs.writeFile(TOKEN_PATH, JSON.stringify(token), (err) => {
-			if (err) return console.error(err);
-			console.log('Token guardado en', TOKEN_PATH);
-		});
-		callback(oAuth2Client);
-	});
-}
 /**
  * Prints the names and majors of students in a sample spreadsheet:
  * @see https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit
@@ -166,8 +139,8 @@ function listMajors(auth) {
 
 
 function getAuthorizationUrl() {
-	fs.readFile('credentials.json', (err, content) => {
-		const {client_secret, client_id, redirect_uris} = JSON.parse(content).installed;
+	fs.readFile(CREDENTIALS_PATH, (err, content) => {
+		const { client_secret, client_id, redirect_uris } = JSON.parse(content).installed;
 		const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
 		AUTHURL = oAuth2Client.generateAuthUrl({
 			access_type: 'offline',
@@ -176,10 +149,44 @@ function getAuthorizationUrl() {
 	});
 }
 
-function loadToken(token) {
-	const { client_secret, client_id, redirect_uris } = credentials.installed;
-	const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+function getNewToken(code) {
+	return new Promise(function (resolve, reject) {
+		fs.readFile(CREDENTIALS_PATH, (err, content) => {
+			const { client_secret, client_id, redirect_uris } = JSON.parse(content).installed;
+			const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+				
+			oAuth2Client.getToken(code, (err, token) => {
+				if (err) {
+					reject(false);
+					return console.error('Error while trying to retrieve access token', err);
+				}
+				oAuth2Client.setCredentials(token);
+	
+				fs.writeFile(TOKEN_PATH, JSON.stringify(token), (err) => {
+					if (err) {
+						reject(false);
+					}
+					console.log('Token stored to', TOKEN_PATH);
+					resolve(true);
+				});
+			});
+		});
+	});
+}
 
-	oAuth2Client.setCredentials(JSON.parse(token));
-	callback(oAuth2Client);
+function loadToken() {
+	return new Promise(function (resolve, reject) {
+		fs.readFile(CREDENTIALS_PATH, (err, content) => {
+			const { client_secret, client_id, redirect_uris } = JSON.parse(content).installed;
+			const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+	
+			fs.readFile(TOKEN_PATH, (err, token) => {
+				if (err) reject(false);
+				else {
+					oAuth2Client.setCredentials(JSON.parse(token));
+					resolve(true);
+				}
+			});
+		});
+	});
 }
